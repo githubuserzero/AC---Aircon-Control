@@ -4,7 +4,6 @@
 -- - Dropdowns filtered to AirCon + AirCon Mirrored prefabs
 -- - Unified aircon read/write path
 -- - 0-safe fallback when dropdown not selected
--- last updated March 21th 2026 ~ 3xp
 
 local ui = ss.ui.surface("main")
 local W, H = 480, 272
@@ -55,6 +54,7 @@ local AIRCON_MIRROR_PREFAB = 473473186
 -- ==================== MEMORY ====================
 local MEM_VIEW = 1
 local MEM_SETTINGS_INIT = 2
+local MEM_REFRESH_TICKS = 3
 
 local function lane_mem_prefab(i)
     return 10 + ((i - 1) * 2)
@@ -98,9 +98,15 @@ for i, def in ipairs(selection_defs) do
     settings_dropdown_selected[def.key] = 0
 end
 
+local cached_aircon_dropdowns = nil
+
 local function init_settings_memory()
     if mem_read_num(MEM_SETTINGS_INIT) == 1 then
         view = (mem_read_num(MEM_VIEW) == 1) and "settings" or "overview"
+        local saved_ticks = mem_read_num(MEM_REFRESH_TICKS)
+        if saved_ticks >= 1 and saved_ticks <= 120 then
+            LIVE_REFRESH_TICKS = saved_ticks
+        end
         return
     end
 
@@ -110,6 +116,7 @@ local function init_settings_memory()
     end
 
     mem_write_num(MEM_VIEW, 0)
+    mem_write_num(MEM_REFRESH_TICKS, LIVE_REFRESH_TICKS)
     mem_write_num(MEM_SETTINGS_INIT, 1)
     view = "overview"
 end
@@ -476,8 +483,6 @@ local function render_overview(statusText, statusColor)
 end
 
 local function render_settings_view(statusText, statusColor)
-    local options, candidates = build_aircon_dropdown_options()
-
     ui:element({
         id = "hdr",
         type = "panel",
@@ -502,7 +507,8 @@ local function render_settings_view(statusText, statusColor)
     local scroll_y = 48
     local scroll_h = H - scroll_y - 20
     local row_h = 30
-    local content_h = (#selection_defs * row_h) + 8
+    local header_row_h = 24
+    local content_h = (#selection_defs * row_h) + header_row_h + 8
 
     local scroll = ui:element({
         id = "settings_scroll",
@@ -512,14 +518,52 @@ local function render_settings_view(statusText, statusColor)
         style = { bg = "#0A0E1A", scrollbar_bg = "#1A1A2E", scrollbar_handle = "#6844aa" }
     })
 
+    scroll:element({
+        id = "refresh_lbl",
+        type = "label",
+        rect = { unit = "px", x = 8, y = 4, w = 140, h = 14 },
+        props = { text = "Live Refresh (ticks)" },
+        style = { font_size = 7, color = "#94A3B8", align = "left" }
+    })
+    scroll:element({
+        id = "refresh_input",
+        type = "textinput",
+        rect = { unit = "px", x = 155, y = 4, w = 80, h = 20 },
+        props = { value = tostring(LIVE_REFRESH_TICKS), placeholder = "1-120" },
+        style = { bg = "#1A1A2E", text = "#FFFFFF", font_size = 7, placeholder_color = "#555555" },
+        on_change = function(v)
+            local n = math.floor(tonumber(v) or 0)
+            if n >= 1 and n <= 120 then
+                LIVE_REFRESH_TICKS = n
+                mem_write_num(MEM_REFRESH_TICKS, n)
+            end
+        end
+    })
+
     for i, def in ipairs(selection_defs) do
         local x = 8
-        local y = 4 + ((i - 1) * row_h)
+        local y = 4 + header_row_h + ((i - 1) * row_h)
         local w = W - 40
         local mem_prefab = lane_mem_prefab(i)
         local mem_namehash = lane_mem_namehash(i)
 
-        settings_dropdown_selected[def.key] = selected_index_from_saved(candidates, mem_prefab, mem_namehash)
+        local cache = cached_aircon_dropdowns
+        local display_options, display_sel
+        if cache then
+            display_options = cache.options_str
+            display_sel = cache.sel[def.key] or 0
+        else
+            local saved_prefab = mem_read_num(mem_prefab)
+            local saved_namehash = mem_read_num(mem_namehash)
+            if saved_prefab ~= 0 and saved_namehash ~= 0 then
+                display_options = "Select|Saved (" .. tostring(saved_prefab) .. "/" .. tostring(saved_namehash) .. ")"
+                display_sel = 1
+            else
+                display_options = "Select"
+                display_sel = 0
+            end
+        end
+        settings_dropdown_selected[def.key] = display_sel
 
         scroll:element({
             id = "cfg_lbl_" .. def.key,
@@ -534,17 +578,29 @@ local function render_settings_view(statusText, statusColor)
             type = "select",
             rect = { unit = "px", x = x, y = y + 11, w = w, h = 16 },
             props = {
-                options = table.concat(options, "|"),
-                selected = settings_dropdown_selected[def.key],
+                options = display_options,
+                selected = display_sel,
                 open = settings_dropdown_open[def.key],
             },
             on_toggle = function()
+                if settings_dropdown_open[def.key] ~= "true" then
+                    local opts, cands = build_aircon_dropdown_options()
+                    local sel_map = {}
+                    for j, sdef in ipairs(selection_defs) do
+                        sel_map[sdef.key] = selected_index_from_saved(cands, lane_mem_prefab(j), lane_mem_namehash(j))
+                    end
+                    cached_aircon_dropdowns = { options_str = table.concat(opts, "|"), candidates = cands, sel = sel_map }
+                end
                 settings_dropdown_open[def.key] = settings_dropdown_open[def.key] == "true" and "false" or "true"
                 render(true)
             end,
             on_change = function(optionIndex)
-                settings_dropdown_selected[def.key] = tonumber(optionIndex) or 0
-                write_selected_device(settings_dropdown_selected[def.key], candidates, mem_prefab, mem_namehash)
+                local picked = tonumber(optionIndex) or 0
+                settings_dropdown_selected[def.key] = picked
+                if cached_aircon_dropdowns then
+                    write_selected_device(picked, cached_aircon_dropdowns.candidates, mem_prefab, mem_namehash)
+                    cached_aircon_dropdowns.sel[def.key] = picked
+                end
                 settings_dropdown_open[def.key] = "false"
                 render(true)
             end
@@ -632,6 +688,25 @@ function render(force_rebuild)
 end
 
 init_settings_memory()
+
+do
+    local any_saved = false
+    for i = 1, #selection_defs do
+        if mem_read_num(lane_mem_prefab(i)) ~= 0 then
+            any_saved = true
+            break
+        end
+    end
+    if any_saved then
+        local opts, cands = build_aircon_dropdown_options()
+        local sel_map = {}
+        for j, sdef in ipairs(selection_defs) do
+            sel_map[sdef.key] = selected_index_from_saved(cands, lane_mem_prefab(j), lane_mem_namehash(j))
+        end
+        cached_aircon_dropdowns = { options_str = table.concat(opts, "|"), candidates = cands, sel = sel_map }
+    end
+end
+
 render(true)
 
 while true do
