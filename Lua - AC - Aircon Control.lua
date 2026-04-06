@@ -64,6 +64,10 @@ local function lane_mem_namehash(i)
     return 11 + ((i - 1) * 2)
 end
 
+local function lane_mem_mode(i)
+    return 34 + (i - 1)
+end
+
 local function mem_read_num(addr)
     return tonumber(mem_read(addr)) or 0
 end
@@ -117,6 +121,9 @@ local function init_settings_memory()
 
     mem_write_num(MEM_VIEW, 0)
     mem_write_num(MEM_REFRESH_TICKS, LIVE_REFRESH_TICKS)
+    for i = 1, #selection_defs do
+        mem_write_num(lane_mem_mode(i), 0)
+    end
     mem_write_num(MEM_SETTINGS_INIT, 1)
     view = "overview"
 end
@@ -203,6 +210,41 @@ local function get_overall_status()
         return "ERROR", "#ff0000"
     end
     return "NOMINAL", "#00E676"
+end
+
+-- ==================== AC MODE CONTROL ====================
+local function read_ac_mode(gas_key)
+    local idx = key_to_selection_index[gas_key]
+    if idx == nil then return 0 end
+    return mem_read_num(lane_mem_mode(idx))
+end
+
+local function write_ac_mode(gas_key, mode)
+    local idx = key_to_selection_index[gas_key]
+    if idx == nil then return end
+    mem_write_num(lane_mem_mode(idx), mode)
+end
+
+local function apply_ac_modes()
+    for _, def in ipairs(selection_defs) do
+        local mode = read_ac_mode(def.key)
+        local prefab, namehash = selected_pair_for_key(def.key)
+        if (prefab or 0) ~= 0 and (namehash or 0) ~= 0 then
+            if mode == 1 then
+                batch_write_name(prefab, namehash, LT.On, 1)
+            elseif mode == 0 then
+                batch_write_name(prefab, namehash, LT.On, 0)
+            elseif mode == 2 then
+                local setting_k = tonumber(batch_read_name(prefab, namehash, LT.Setting, LBM.Average)) or 0
+                local temp_k = tonumber(batch_read_name(prefab, namehash, LT.TemperatureInput, LBM.Average)) or 0
+                if setting_k > 0 and math.abs(temp_k - setting_k) > 2 then
+                    batch_write_name(prefab, namehash, LT.On, 1)
+                else
+                    batch_write_name(prefab, namehash, LT.On, 0)
+                end
+            end
+        end
+    end
 end
 
 -- ==================== DEVICE LIST ====================
@@ -394,6 +436,9 @@ local function render_overview(statusText, statusColor)
             td_val = nil,
             op_val = nil,
             pe_val = nil,
+            mode_auto_btn = nil,
+            mode_on_btn = nil,
+            mode_off_btn = nil,
         }
 
         gas_panel:element({
@@ -447,7 +492,7 @@ local function render_overview(statusText, statusColor)
         gas_panel:element({
             id = "gas_in_" .. def.key,
             type = "textinput",
-            rect = { unit = "px", x = 54, y = 34, w = 120, h = 15 },
+            rect = { unit = "px", x = 4, y = 34, w = 152, h = 14 },
             props = { placeholder = "Enter desired temp" },
             style = { bg = "#252724", text = "#FFFFFF", font_size = 7, placeholder_color = "#9a2424", gradient = "#1a0926", gradient_dir = "vertical" },
             on_change = function(v)
@@ -459,7 +504,7 @@ local function render_overview(statusText, statusColor)
         gas_panel:element({
             id = "gas_plus_" .. def.key,
             type = "button",
-            rect = { unit = "px", x = 72, y = 50, w = 40, h = 10 },
+            rect = { unit = "px", x = 4, y = 50, w = 30, h = 12 },
             props = { text = "+1" },
             style = { bg = "#268409", text = "#FFFFFF", font_size = 6, gradient = "#1a0926", gradient_dir = "vertical" },
             on_click = function()
@@ -471,11 +516,48 @@ local function render_overview(statusText, statusColor)
         gas_panel:element({
             id = "gas_minus_" .. def.key,
             type = "button",
-            rect = { unit = "px", x = 116, y = 50, w = 40, h = 10 },
+            rect = { unit = "px", x = 37, y = 50, w = 30, h = 12 },
             props = { text = "-1" },
             style = { bg = "#880404", text = "#FFFFFF", font_size = 6, gradient = "#1a0926", gradient_dir = "vertical" },
             on_click = function()
                 write_temp(def.key, -1)
+                render(false)
+            end
+        })
+
+        local mode = read_ac_mode(def.key)
+        handles.overview[def.key].mode_auto_btn = gas_panel:element({
+            id = "gas_auto_" .. def.key,
+            type = "button",
+            rect = { unit = "px", x = 163, y = 33, w = 53, h = 12 },
+            props = { text = "AUTO" },
+            style = { bg = mode == 2 and "#1a5276" or "#2b2b2b", text = "#FFFFFF", font_size = 6, gradient = "#1a0926", gradient_dir = "vertical" },
+            on_click = function()
+                write_ac_mode(def.key, 2)
+                render(false)
+            end
+        })
+
+        handles.overview[def.key].mode_on_btn = gas_panel:element({
+            id = "gas_on_" .. def.key,
+            type = "button",
+            rect = { unit = "px", x = 163, y = 46, w = 25, h = 16 },
+            props = { text = "ON" },
+            style = { bg = mode == 1 and "#268409" or "#2b2b2b", text = "#FFFFFF", font_size = 6, gradient = "#1a0926", gradient_dir = "vertical" },
+            on_click = function()
+                write_ac_mode(def.key, 1)
+                render(false)
+            end
+        })
+
+        handles.overview[def.key].mode_off_btn = gas_panel:element({
+            id = "gas_off_" .. def.key,
+            type = "button",
+            rect = { unit = "px", x = 190, y = 46, w = 26, h = 16 },
+            props = { text = "OFF" },
+            style = { bg = mode == 0 and "#880404" or "#2b2b2b", text = "#FFFFFF", font_size = 6, gradient = "#1a0926", gradient_dir = "vertical" },
+            on_click = function()
+                write_ac_mode(def.key, 0)
                 render(false)
             end
         })
@@ -646,6 +728,16 @@ local function update_overview_dynamic()
                 gas_handles.pe_val:set_props({ text = fmt(pe, 0) .. "%" })
                 gas_handles.pe_val:set_style({ font_size = 6, color = pct_color(pe), align = "center" })
             end
+            local mode = read_ac_mode(def.key)
+            if gas_handles.mode_auto_btn ~= nil then
+                gas_handles.mode_auto_btn:set_style({ bg = mode == 2 and "#1a5276" or "#2b2b2b", text = "#FFFFFF", font_size = 6, gradient = "#1a0926", gradient_dir = "vertical" })
+            end
+            if gas_handles.mode_on_btn ~= nil then
+                gas_handles.mode_on_btn:set_style({ bg = mode == 1 and "#268409" or "#2b2b2b", text = "#FFFFFF", font_size = 6, gradient = "#1a0926", gradient_dir = "vertical" })
+            end
+            if gas_handles.mode_off_btn ~= nil then
+                gas_handles.mode_off_btn:set_style({ bg = mode == 0 and "#880404" or "#2b2b2b", text = "#FFFFFF", font_size = 6, gradient = "#1a0926", gradient_dir = "vertical" })
+            end
         end
     end
 end
@@ -713,6 +805,7 @@ while true do
     tick = tick + 1
     elapsed = elapsed + 1
     if tick % LIVE_REFRESH_TICKS == 0 then
+        apply_ac_modes()
         render(false)
     end
     ic.yield()
